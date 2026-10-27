@@ -12,6 +12,7 @@ The plugin uses the OpenCode v2 plugin API to fetch OmniRoute's OpenAI-compatibl
 - **Registers chat models only.** Skips invalid entries and models identified as non-chat or as not producing text, such as image, video, embedding, or reranking models.
 - **Preserves complete model IDs.** Uses each gateway model ID as its display name, so backend prefixes remain visible and similarly named models stay distinguishable.
 - **Uses model metadata when available.** Carries through input modalities, tool-calling capability, and reported context/output limits.
+- **Exposes reasoning levels as variants.** When the gateway reports reasoning effort tiers for a model (`low`, `medium`, `high`, `xhigh`, `max`), the plugin registers one OpenCode model variant per tier, so the model is reported as reasoning-capable and its level can be switched in place instead of selecting a separate suffixed model ID.
 - **Recovers without a restart.** If the gateway or credential is unavailable at startup, the plugin keeps retrying. When a saved OmniRoute credential becomes available, a later retry can populate the catalog.
 
 ## Requirements
@@ -95,12 +96,24 @@ An OpenCode2 background service may not inherit environment variables exported o
 
 If the OpenCode2 process has `OMNIROUTE_BASE_URL` set, the plugin uses it instead of `settings.baseURL`. Otherwise, it reads `providers.omniroute.settings.baseURL` from `opencode.jsonc`.
 
+## Reasoning levels
+
+OmniRoute advertises reasoning effort tiers per model (for example `low`, `medium`, `high`, `xhigh`, `max`). The plugin turns each reported tier into an OpenCode model variant, so a model such as `cmd/deepseek/deepseek-v4.1-flash` is reported as reasoning-capable and can run at any level without selecting a separate `-high` model ID.
+
+Switch the level without changing the model:
+
+- In the TUI, open the variant selector from the command palette (**Variant cycle** / **Switch model variant**), or pick the level in the model dialog.
+- On the command line, append the tier after `#`: `opencode run -m 'omniroute/cmd/deepseek/deepseek-v4.1-flash#high' "..."`.
+- Leaving the variant at **Default** sends no effort field, so OmniRoute's own default applies.
+
+A selected variant sends `reasoning_effort` in the request body. Models that report no tiers are registered exactly as before, with no variants.
+
 ## How it works
 
 1. **Read settings.** The plugin reads `providers.omniroute.settings.baseURL` from `opencode.jsonc`, unless `OMNIROUTE_BASE_URL` overrides it.
 2. **Resolve credentials.** It checks `OMNIROUTE_API_KEY`, then a configured provider API key if present, then the credential saved through `/connect`.
 3. **Fetch the catalog.** It sends authenticated requests to `{baseURL}/models` (for example, `https://gateway.example/v1/models`). Three requests run concurrently to improve coverage when the gateway's catalog rotates between requests.
-4. **Filter and normalize.** The plugin deduplicates valid model IDs, excludes known non-chat models, and builds OpenCode model entries using any available metadata.
+4. **Filter and normalize.** The plugin deduplicates valid model IDs, excludes known non-chat models, and builds OpenCode model entries using any available metadata, including one model variant per reported reasoning effort tier.
 5. **Register or refresh.** It registers the inventory through the v2 provider API and reloads the provider when the catalog changes.
 6. **Stay in sync.** After a successful sync, it checks again every five minutes. If a sync fails, it retries with exponential backoff starting at two seconds and capped at 60 seconds.
 

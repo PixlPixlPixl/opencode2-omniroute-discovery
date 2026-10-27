@@ -9,6 +9,10 @@
 //      so the backend prefix is visible (e.g. "opencode-go/deepseek-v4-flash" vs
 //      "ds/deepseek-v4-flash"). Models the gateway no longer reports disappear
 //      with the replacement, so the catalog never goes stale.
+//   3. Models that report reasoning effort tiers (capabilities.effort_tiers,
+//      e.g. low/medium/high/xhigh/max) get one opencode variant per tier, so the
+//      level can be switched in place (/model ...#high) instead of selecting a
+//      separate "-high" model id. Selecting a variant sends "reasoning_effort".
 //
 // Recovery: if a sync fails (gateway down, Tailscale not up yet, ...) the plugin
 // keeps retrying with exponential backoff instead of leaving the provider
@@ -50,7 +54,12 @@ type GatewayModel = {
   max_output_tokens?: number
   input_modalities?: string[]
   output_modalities?: string[]
-  capabilities?: { tool_calling?: boolean; reasoning?: boolean }
+  effort_tiers?: string[]
+  capabilities?: {
+    tool_calling?: boolean
+    reasoning?: boolean
+    effort_tiers?: string[]
+  }
 }
 
 type GatewaySettings = { baseUrl?: string; apiKey?: string }
@@ -165,6 +174,36 @@ function isChatModel(m: GatewayModel): boolean {
   return CHAT_TYPES.has(m.type)
 }
 
+// Reasoning effort levels reported by the gateway ("low" ... "max"). A tier id
+// ends up in a model reference as "provider/model#tier", so only plain tokens
+// are accepted; "default" is reserved by opencode for "no variant selected".
+const REASONING_TIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/
+
+function reasoningTiers(m: GatewayModel): string[] {
+  const declared = m.capabilities?.effort_tiers ?? m.effort_tiers ?? []
+  if (!Array.isArray(declared)) return []
+  const tiers: string[] = []
+  for (const raw of declared) {
+    if (typeof raw !== "string") continue
+    const tier = raw.trim()
+    if (!REASONING_TIER_RE.test(tier) || tier === "default") continue
+    if (!tiers.includes(tier)) tiers.push(tier)
+  }
+  return tiers
+}
+
+// opencode exposes reasoning levels as per-model "variants". A variant that
+// carries settings.reasoningEffort makes openai-compatible providers send
+// "reasoning_effort" in the request body, which is what OmniRoute routes on, so
+// the level can be switched with /model ...#high instead of picking a separate
+// "-high" model id.
+function buildVariants(m: GatewayModel) {
+  return reasoningTiers(m).map((tier) => ({
+    id: tier,
+    settings: { reasoningEffort: tier },
+  }))
+}
+
 function buildModelInfo(providerID: ReturnType<typeof Provider.ID.make>, m: GatewayModel) {
   const info = Model.Info.default(providerID, Model.ID.make(m.id))
   // Full id as the name so the backend prefix is visible ("aug/gpt5" vs
@@ -179,6 +218,7 @@ function buildModelInfo(providerID: ReturnType<typeof Provider.ID.make>, m: Gate
     output: ["text"],
     temperature: true,
   }
+  info.variants = buildVariants(m)
 
   // Only set a limit from gateway-reported numbers. Never advertise an output
   // budget larger than the reported context window.
@@ -377,6 +417,7 @@ export default Plugin.define({
           m.max_input_tokens ?? null,
           m.max_output_tokens ?? null,
           m.capabilities?.tool_calling ?? null,
+          m.capabilities?.effort_tiers ?? m.effort_tiers ?? null,
           m.input_modalities ?? null,
         ]),
       )
