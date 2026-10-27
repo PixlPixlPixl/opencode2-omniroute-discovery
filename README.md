@@ -1,116 +1,136 @@
-# OpenCode2 OmniRoute Discovery Plugin
+# OpenCode2 OmniRoute Model Discovery
 
-Automatically discover and sync all available models served by a self-hosted OmniRoute endpoint with OpenCode2, eliminating the need to manually enter each model in your configuration file.
+Automatically discover the chat models exposed by an OmniRoute gateway and keep them available in OpenCode2—without maintaining a separate model list in `opencode.jsonc`.
 
-## Overview
+The plugin uses the OpenCode v2 plugin API to fetch OmniRoute's OpenAI-compatible models endpoint and register the discovered models under the `omniroute` provider.
 
-This plugin enables OpenCode2 to dynamically fetch the complete list of models from your OmniRoute gateway and keep your provider configuration in sync. Instead of static model declarations, your OmniRoute provider will automatically reflect all models available on your endpoint.
+## What it does
 
-## Features
-
-- 🚀 **Automatic Model Discovery** - Fetches the complete `/v1/models` list from your OmniRoute endpoint
-- 🔄 **Dynamic Sync** - Keeps your OpenCode2 configuration synchronized with your OmniRoute server
-- 🔐 **Secure Credential Management** - Support for both hardcoded and environment variable-based configuration
-- 🔌 **OpenAI-Compatible** - Works seamlessly with the `@ai-sdk/openai-compatible` SDK
-- ✨ **Zero Manual Configuration** - No need to manually list each model
-
-## Installation
-
-1. Clone or install this plugin into your OpenCode2 plugins directory
-2. Ensure your OpenCode2 setup includes the OmniRoute provider configuration
-
-## Setup
-
-### Option 1: Hardcoded Configuration (opencode.jsonc)
-
-Add the OmniRoute provider directly to your `opencode.jsonc` file with your credentials:
-
-```jsonc
-{
-  "provider": {
-    // OmniRoute gateway (OpenAI-compatible). The base URL and API key live in
-    // options below. No models are listed here - plugins/omniroute.ts
-    // fetches the full /v1/models list and keeps this provider in sync.
-    "omniroute": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "OmniRoute",
-      "api": "https://your-omniroute-endpoint.com",
-      "options": {
-        "baseURL": "https://your-omniroute-endpoint.com",
-        "apiKey": "your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-### Option 2: Environment Variables (Recommended for Security)
-
-To keep your credentials out of your configuration file, use environment variables to override the values per machine:
-
-```bash
-export OMNIROUTE_BASE_URL="https://your-omniroute-endpoint.com"
-export OMNIROUTE_API_KEY="your-api-key-here"
-```
-
-Then in your `opencode.jsonc`, use placeholder values:
-
-```jsonc
-{
-  "provider": {
-    // OmniRoute gateway (OpenAI-compatible). The base URL and API key live in
-    // options below (env vars OMNIROUTE_BASE_URL / OMNIROUTE_API_KEY override
-    // them per machine). No models are listed here - plugins/omniroute.ts
-    // fetches the full /v1/models list and keeps this provider in sync.
-    "omniroute": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "OmniRoute",
-      "api": "YOUR OMNIROUTE BASE URL",
-      "options": {
-        "baseURL": "YOUR OMNIROUTE BASE URL",
-        "apiKey": "YOUR OMNIROUTE API KEY"
-      }
-    }
-  }
-}
-```
-
-**Note:** Environment variables will override the values in opencode.jsonc, so set them before running OpenCode2.
-
-## How It Works
-
-1. The plugin checks for environment variables (`OMNIROUTE_BASE_URL` and `OMNIROUTE_API_KEY`)
-2. If not found, it falls back to values in `opencode.jsonc`
-3. Queries your OmniRoute endpoint's `/v1/models` API endpoint
-4. Retrieves the complete list of available models
-5. Dynamically registers all discovered models with OpenCode2
-6. Keeps the provider configuration in sync without manual updates
+- **Discovers models automatically.** Fetches the gateway's `/models` endpoint and builds the provider's model catalog.
+- **Keeps the catalog current.** Retries failed initial syncs with exponential backoff and refreshes a working catalog every five minutes.
+- **Handles rotating catalogs.** Makes three concurrent model-list requests and merges their results, deduplicating models by ID.
+- **Registers chat models only.** Skips invalid entries and models identified as non-chat or as not producing text, such as image, video, embedding, or reranking models.
+- **Preserves complete model IDs.** Uses each gateway model ID as its display name, so backend prefixes remain visible and similarly named models stay distinguishable.
+- **Uses model metadata when available.** Carries through input modalities, tool-calling capability, and reported context/output limits.
+- **Recovers without a restart.** If the gateway or credential is unavailable at startup, the plugin keeps retrying. When a saved OmniRoute credential becomes available, a later retry can populate the catalog.
 
 ## Requirements
 
-- OpenCode2 installation
-- `@ai-sdk/openai-compatible` package
-- A running OmniRoute endpoint
-- Valid OmniRoute base URL and API key
+- An OpenCode2/OpenCode v2 installation that supports the v2 plugin API used by this plugin.
+- A running OmniRoute gateway reachable from the OpenCode2 process.
+- An OmniRoute API key with permission to call the gateway's models endpoint.
 
-## Usage
+## Installation
 
-Once configured, OpenCode2 will automatically:
-- Discover all models on startup
-- Make all discovered models available for use
-- Update the model list when the configuration is reloaded
+Place `omniroute.ts` in the local plugins directory alongside your OpenCode2 configuration. For a standard user configuration, run this from the repository directory:
 
-No additional steps required—your models are ready to use immediately!
+```sh
+mkdir -p ~/.config/opencode/plugins
+cp omniroute.ts ~/.config/opencode/plugins/omniroute.ts
+```
+
+Keep the layout below: the plugin reads `../opencode.jsonc` relative to its own file.
+
+```text
+~/.config/opencode/
+├── opencode.jsonc
+└── plugins/
+    └── omniroute.ts
+```
+
+If your OpenCode2 installation uses a different config directory, place the plugin in that directory's `plugins/` folder and keep `opencode.jsonc` in its parent directory.
+
+## Configuration
+
+Add the OmniRoute provider to `opencode.jsonc`. **Do not list individual models**; the plugin supplies the provider's model inventory at runtime.
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    // OmniRoute gateway (OpenAI-compatible). The model list is not configured
+    // here: plugins/omniroute.ts fetches /v1/models and keeps this provider's
+    // catalog in sync.
+    //
+    // "env" lets OpenCode pick up OMNIROUTE_API_KEY when the environment has it.
+    // Otherwise connect OmniRoute once with /connect; the stored credential is
+    // also used by the plugin for model discovery.
+    "omniroute": {
+      "name": "OmniRoute",
+      "env": ["OMNIROUTE_API_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://your-omniroute-endpoint.com/v1"
+      }
+    }
+  }
+}
+```
+
+Replace `https://your-omniroute-endpoint.com/v1` with your gateway's API base URL. Include `/v1` if that is the prefix used by your OmniRoute endpoint, but **do not append `/models`**: the plugin appends that path itself.
+
+This is the OpenCode v2 provider structure: `providers` (plural), `package`, and `settings.baseURL`. The old `provider` / `npm` / `options` example is not the recommended configuration for this plugin.
+
+### API key
+
+The recommended configuration keeps the secret out of `opencode.jsonc`.
+
+**Option A: Environment variable**
+
+Make `OMNIROUTE_API_KEY` available to the OpenCode2 process:
+
+```sh
+export OMNIROUTE_API_KEY="your-omniroute-api-key"
+```
+
+The `env` array in the provider configuration tells OpenCode which environment variable to use. The plugin also reads this variable directly.
+
+**Option B: OpenCode2's saved connection**
+
+In OpenCode2, run `/connect` and connect the `omniroute` provider. The plugin can read the saved credential and use it for model discovery.
+
+An OpenCode2 background service may not inherit environment variables exported only in an interactive terminal. If the plugin reports that no API key is available, connect through `/connect` or ensure the variable is present in the service's environment. The plugin retries automatically, so a newly available credential normally does not require a restart.
+
+### Optional base URL override
+
+If the OpenCode2 process has `OMNIROUTE_BASE_URL` set, the plugin uses it instead of `settings.baseURL`. Otherwise, it reads `providers.omniroute.settings.baseURL` from `opencode.jsonc`.
+
+## How it works
+
+1. **Read settings.** The plugin reads `providers.omniroute.settings.baseURL` from `opencode.jsonc`, unless `OMNIROUTE_BASE_URL` overrides it.
+2. **Resolve credentials.** It checks `OMNIROUTE_API_KEY`, then a configured provider API key if present, then the credential saved through `/connect`.
+3. **Fetch the catalog.** It sends authenticated requests to `{baseURL}/models` (for example, `https://gateway.example/v1/models`). Three requests run concurrently to improve coverage when the gateway's catalog rotates between requests.
+4. **Filter and normalize.** The plugin deduplicates valid model IDs, excludes known non-chat models, and builds OpenCode model entries using any available metadata.
+5. **Register or refresh.** It registers the inventory through the v2 provider API and reloads the provider when the catalog changes.
+6. **Stay in sync.** After a successful sync, it checks again every five minutes. If a sync fails, it retries with exponential backoff starting at two seconds and capped at 60 seconds.
+
+A failed or empty fetch does not replace a previously working catalog with an empty one. A successful sync only reloads the provider when the model inventory or relevant metadata has changed.
 
 ## Troubleshooting
 
-### Models not appearing
-- Verify your OmniRoute endpoint is accessible
-- Check that `OMNIROUTE_BASE_URL` and `OMNIROUTE_API_KEY` are correctly set (either in environment or opencode.jsonc)
-- Ensure your API key has permission to access the `/v1/models` endpoint
-- Review OpenCode2 plugin logs for error details
+### No OmniRoute models appear
 
-### Connection issues
-- Test connectivity to your OmniRoute endpoint: `curl https://your-endpoint/v1/models`
-- Verify the base URL format (should include protocol: `https://...`)
-- Check network/firewall rules if accessing a remote endpoint
+- Confirm the plugin is installed in the loaded `plugins/` directory and that `opencode.jsonc` is in its parent directory.
+- Check that `settings.baseURL` is the API base URL and includes the correct version prefix (commonly `/v1`). Do not include `/models` in the configured URL.
+- Verify that the gateway is reachable and the API key is valid. You can test the endpoint directly:
+
+  ```sh
+  curl -sS \
+    -H "Authorization: Bearer $OMNIROUTE_API_KEY" \
+    "https://your-omniroute-endpoint.com/v1/models"
+  ```
+
+- Check the OpenCode2 logs for messages beginning with `[omniroute]`. The plugin logs missing credentials, fetch failures, skipped models, and registration or reload errors.
+- If you just connected through `/connect`, allow the background retry to run; retries continue automatically and can be as far apart as 60 seconds.
+
+### Some models are missing
+
+Only models suitable for text/chat sessions are registered. Models whose metadata marks them as non-chat or says they do not output text are intentionally skipped. Check the gateway's `/v1/models` response to see which IDs and metadata it exposes.
+
+### Changes at the gateway are not showing up
+
+The plugin refreshes the catalog every five minutes after a successful sync. It reloads the provider only when the returned model list or relevant metadata changes. Confirm that the endpoint URL targets the expected OmniRoute instance and inspect the `[omniroute]` logs for failed requests.
+
+---
+
+The plugin manages model discovery only; OmniRoute remains responsible for routing each selected model to its configured upstream.
